@@ -1,4 +1,21 @@
+#undef UNICODE
+
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x501
+
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include "./matching_engine.h"
+
+// Need to link with Ws2_32.lib
+#pragma comment (lib, "Ws2_32.lib")
+//#pragma comment (lib, "Mswsock.lib")
+
+#define DEFAULT_BUFLEN 512
+#define DEFAULT_PORT "27015"
 
 using namespace std;
 
@@ -236,60 +253,176 @@ private:
 
 };
 
-class RandomData {
-    private:
-        int price_low;
-        int price_high;
-        int quantity_low;
-        int quantity_high;
-        int order_id;
-        string order_dir;
-    public:
-        RandomData(int order_id = 0, int price_l = 100, int price_h = 110, int quantity_l = 10, int quantity_h = 20) 
-        {
-            this->price_low = price_l;
-            this->price_high = price_h;
-            this->quantity_low = quantity_l;
-            this->quantity_high = quantity_h;
-            this->order_id = order_id;
-            this->order_dir = "buy";
-        }
-        Order get_data() {
-            double p = (double)rand() / RAND_MAX;
-            if (p <= 0.5) 
-            {
-                this->order_dir = "buy";
-            } 
-            else 
-            {
-                this->order_dir = "sell";
-            }
+Order parse_buffer(char *recvbuf)
+{   
+    string data(recvbuf);
+    string delimiter = ",";
+    Order o;
 
-            double price = (double)rand() / RAND_MAX * (this->price_high - this->price_low) + this->price_low;
-            double quantity = (double)rand() / RAND_MAX * (this->quantity_high - this->quantity_low) + this->quantity_low;
-            return Order(this->order_id, this->order_dir, price, quantity);
-        }
-};
-
-int main()
-{
-    MatchingEngine m;
-    Order o[2];
-    RandomData r;
-
-    for(int i=0; i<10; i++)
-    {   
-        auto x = r.get_data();
-        x.id = i;
-        cout<<x.id<<"\t"<<x.price<<"\t"<<x.quantity<<"\t"<<x.direction<<"\n";
-        m.process(x);
-    }
-
-    auto z = m.get_trades();
-
-    for(int i = 0; i<z.size(); i++)
-    {
-        cout<<z[i].price<<endl;
-    }
+    size_t pos = data.find(delimiter);
+    o.id = stoi(data.substr(0, pos));
+    data.erase(0, pos + delimiter.length());
     
+    pos = data.find(delimiter);
+    o.direction = data.substr(0, pos);
+    data.erase(0, pos + delimiter.length());
+
+    pos = data.find(delimiter);
+    o.price = stof(data.substr(0, pos));
+    data.erase(0, pos + delimiter.length());
+
+    pos = data.find(delimiter);
+    o.quantity = stoi(data.substr(0, pos));
+    data.erase(0, pos + delimiter.length());
+
+    o.show_order(o);
+
+    return o;
+}
+
+void parse_trade(vector<Trade> *t, string *databuf)
+{
+    *databuf = "";
+    string delimiter = ",";
+
+    if(t->size() > 0)
+    {
+        for(auto i=0; i<t->size(); i++)
+        { 
+            databuf->append(to_string((*t)[i].price));
+            databuf->append(",");
+            databuf->append(to_string((*t)[i].quantity));
+            databuf->append(",");
+        }
+    }
+}
+
+
+int __cdecl main(void) 
+{
+    WSADATA wsaData;
+    int iResult;
+
+    SOCKET ListenSocket = INVALID_SOCKET;
+    SOCKET ClientSocket = INVALID_SOCKET;
+
+    struct addrinfo *result = NULL;
+    struct addrinfo hints;
+
+    int iSendResult;
+    char *recvbuf = new char[DEFAULT_BUFLEN];
+    int recvbuflen = DEFAULT_BUFLEN;
+    
+    // Initialize Winsock
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
+    }
+
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    // Resolve the server address and port
+    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+    if ( iResult != 0 ) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
+    }
+
+    // Create a SOCKET for the server to listen for client connections.
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        printf("socket failed with error: %ld\n", WSAGetLastError());
+        freeaddrinfo(result);
+        WSACleanup();
+        return 1;
+    }
+
+    // Setup the TCP listening socket
+    iResult = bind( ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        printf("bind failed with error: %d\n", WSAGetLastError());
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    freeaddrinfo(result);
+
+    iResult = listen(ListenSocket, SOMAXCONN);
+    if (iResult == SOCKET_ERROR) {
+        printf("listen failed with error: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // Accept a client socket
+    ClientSocket = accept(ListenSocket, NULL, NULL);
+    if (ClientSocket == INVALID_SOCKET) {
+        printf("accept failed with error: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // No longer need server socket
+    closesocket(ListenSocket);
+    MatchingEngine m;
+    // Receive until the peer shuts down the connection
+    do {
+
+        iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+        if (iResult > 0) {
+            auto order = parse_buffer(recvbuf);
+            m.process(order);
+            auto trade = m.get_trades();
+            
+            string ch;
+            parse_trade(&trade, &ch);
+            memset(recvbuf, '\0', recvbuflen);
+            strcpy(recvbuf, ch.data());
+            //printf("Bytes received: %d\n", iResult);
+
+        // Echo the buffer back to the sender
+            iSendResult = send( ClientSocket, recvbuf, iResult, 0 );
+            if (iSendResult == SOCKET_ERROR) {
+                printf("send failed with error: %d\n", WSAGetLastError());
+                closesocket(ClientSocket);
+                WSACleanup();
+                return 1;
+            }
+            //printf("Bytes sent: %d\n", iSendResult);
+        }
+        else if (iResult == 0)
+            printf("Connection closing...\n");
+        else  {
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            closesocket(ClientSocket);
+            WSACleanup();
+            return 1;
+        }
+
+    } while (iResult > 0);
+
+    // shutdown the connection since we're done
+    iResult = shutdown(ClientSocket, SD_SEND);
+    if (iResult == SOCKET_ERROR) {
+        printf("shutdown failed with error: %d\n", WSAGetLastError());
+        closesocket(ClientSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    // cleanup
+    closesocket(ClientSocket);
+    WSACleanup();
+
+    return 0;
 }
