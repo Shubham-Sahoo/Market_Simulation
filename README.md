@@ -11,6 +11,8 @@ g++ server.cpp -o server -lws2_32
 ### Client Code
 ```
 g++ .\client.cpp -o client -lws2_32
-.\client.exe
+.\client.exe 100 localhost
 ```
+We can change the number of orders using the first argument, currently it is given "100" in this example.
+Also, we can change the seed of the random function inside the client code.
 
